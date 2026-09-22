@@ -124,11 +124,26 @@ def normalize_history(frame: pd.DataFrame) -> pd.DataFrame:
             frame[column] = ""
     frame["source_id_number"] = pd.to_numeric(frame["source_id"], errors="coerce")
     frame = frame.sort_values(["published_date", "item", "source_id_number"])
-    frame = frame.drop_duplicates(subset=["published_date", "item"], keep="first")
+    frame = frame.drop_duplicates(subset=["published_date", "item"], keep="last")
     frame["announcement_key"] = frame.apply(
         lambda row: announcement_key(row["published_date"], row["item"], row["price"]), axis=1
     )
     return frame.drop(columns=["source_id_number"])[ANNOUNCEMENT_COLUMNS].reset_index(drop=True)
+
+
+def remove_future_date_spikes(frame: pd.DataFrame) -> pd.DataFrame:
+    """Drop a page whose date jumps forward and then goes backward on later IDs."""
+    if frame.empty:
+        return frame
+    kept_groups = []
+    for _, item_data in frame.groupby("item", sort=False):
+        item_data = item_data.copy()
+        item_data["source_id_number"] = pd.to_numeric(item_data["source_id"], errors="coerce")
+        item_data = item_data.sort_values("source_id_number").reset_index(drop=True)
+        later_min_dates = item_data["published_date"][::-1].cummin()[::-1].shift(-1)
+        is_spike = item_data["published_date"] > later_min_dates.fillna(item_data["published_date"])
+        kept_groups.append(item_data.loc[~is_spike].drop(columns=["source_id_number"]))
+    return pd.concat(kept_groups, ignore_index=True) if kept_groups else empty_announcements()
 
 
 def load_announcements() -> pd.DataFrame:
@@ -241,42 +256,67 @@ def scrape_page(page_id: int, target_item: str) -> dict | None:
     }
 
 
+def scrape_page_date(page_id: int) -> str | None:
+    response = requests.get(
+        URL_TEMPLATE.format(id=page_id),
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    response.encoding = "utf-8"
+    soup = BeautifulSoup(response.text, "html.parser")
+    tables = soup.find_all("table")
+    return parse_thai_date(tables[0].get_text(" ", strip=True)) if tables else None
+
+
 def update_prices(first_id: int, max_id: int, existing: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     if max_id < first_id:
         raise ValueError("Max ID ต้องมากกว่าหรือเท่ากับ ID เริ่มต้น")
-    known_publications = set(zip(existing["published_date"], existing["item"]))
-    latest_dates = {}
-    for item, item_data in existing.groupby("item"):
-        latest_dates[item] = item_data["published_date"].max()
-    new_rows = []
+    original_publications = set(zip(existing["published_date"], existing["item"]))
+    scanned_rows = []
     duplicate_count = 0
     error_count = 0
     scanned_count = 0
     for page_id in range(first_id, max_id + 1):
         scanned_count += 1
+        page_date = None
+        try:
+            page_date = scrape_page_date(page_id)
+        except requests.RequestException:
+            error_count += 1
+        if page_date:
+            for target_item in ITEMS.values():
+                scanned_rows.append({
+                    "announcement_key": "",
+                    "source_id": str(page_id),
+                    "published_date": page_date,
+                    "item": target_item,
+                    "price": "",
+                    "url": URL_TEMPLATE.format(id=page_id),
+                    "scraped_at": datetime.now().isoformat(timespec="seconds"),
+                })
         for target_item in ITEMS.values():
             try:
                 row = scrape_page(page_id, target_item)
                 if row is None:
                     continue
-                publication = (row["published_date"], row["item"])
-                if publication in known_publications or row["published_date"] <= latest_dates.get(row["item"], ""):
-                    duplicate_count += 1
-                    continue
-                known_publications.add(publication)
-                latest_dates[row["item"]] = row["published_date"]
-                new_rows.append(row)
+                scanned_rows.append(row)
             except requests.RequestException:
                 error_count += 1
             except Exception:
                 error_count += 1
-    if new_rows:
-        existing = pd.concat([existing, pd.DataFrame(new_rows)], ignore_index=True)
-        existing = normalize_history(existing)
-        existing = existing.sort_values(["published_date", "source_id"]).reset_index(drop=True)
-    return existing, {
+    combined = pd.concat([existing, pd.DataFrame(scanned_rows)], ignore_index=True)
+    combined = remove_future_date_spikes(combined)
+    combined = combined[combined["price"].astype(str).str.strip().ne("")]
+    updated = normalize_history(combined)
+    updated_publications = set(zip(updated["published_date"], updated["item"]))
+    new_count = len(updated_publications - original_publications)
+    duplicate_count = max(0, len(scanned_rows) - new_count)
+    if not updated.empty:
+        updated = updated.sort_values(["published_date", "source_id"]).reset_index(drop=True)
+    return updated, {
         "scanned": scanned_count,
-        "new": len(new_rows),
+        "new": new_count,
         "duplicates": duplicate_count,
         "errors": error_count,
     }
