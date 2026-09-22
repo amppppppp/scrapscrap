@@ -115,6 +115,22 @@ def empty_announcements() -> pd.DataFrame:
     return pd.DataFrame(columns=ANNOUNCEMENT_COLUMNS)
 
 
+def normalize_history(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return empty_announcements()
+    frame = frame.copy()
+    for column in ANNOUNCEMENT_COLUMNS:
+        if column not in frame:
+            frame[column] = ""
+    frame["source_id_number"] = pd.to_numeric(frame["source_id"], errors="coerce")
+    frame = frame.sort_values(["published_date", "item", "source_id_number"])
+    frame = frame.drop_duplicates(subset=["published_date", "item"], keep="first")
+    frame["announcement_key"] = frame.apply(
+        lambda row: announcement_key(row["published_date"], row["item"], row["price"]), axis=1
+    )
+    return frame.drop(columns=["source_id_number"])[ANNOUNCEMENT_COLUMNS].reset_index(drop=True)
+
+
 def load_announcements() -> pd.DataFrame:
     if github_configured():
         content, _ = github_read_file("announcements.csv")
@@ -128,11 +144,11 @@ def load_announcements() -> pd.DataFrame:
     for column in ANNOUNCEMENT_COLUMNS:
         if column not in frame:
             frame[column] = ""
-    return frame[ANNOUNCEMENT_COLUMNS]
+    return normalize_history(frame[ANNOUNCEMENT_COLUMNS])
 
 
 def save_announcements(frame: pd.DataFrame) -> None:
-    content = frame[ANNOUNCEMENT_COLUMNS].to_csv(index=False).encode("utf-8-sig")
+    content = normalize_history(frame).to_csv(index=False).encode("utf-8-sig")
     if github_configured():
         github_write_file("announcements.csv", content, "Update Wongpanit price history")
     else:
@@ -192,8 +208,8 @@ def extract_price(tables, target_item: str) -> str | None:
     return None
 
 
-def announcement_key(published_date: str, item: str, price: str) -> str:
-    raw_value = "|".join((published_date, item, re.sub(r"\s+", "", price)))
+def announcement_key(published_date: str, item: str, price: str = "") -> str:
+    raw_value = "|".join((published_date, item))
     return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:20]
 
 
@@ -228,7 +244,10 @@ def scrape_page(page_id: int, target_item: str) -> dict | None:
 def update_prices(first_id: int, max_id: int, existing: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     if max_id < first_id:
         raise ValueError("Max ID ต้องมากกว่าหรือเท่ากับ ID เริ่มต้น")
-    known_keys = set(existing["announcement_key"].astype(str))
+    known_publications = set(zip(existing["published_date"], existing["item"]))
+    latest_dates = {}
+    for item, item_data in existing.groupby("item"):
+        latest_dates[item] = item_data["published_date"].max()
     new_rows = []
     duplicate_count = 0
     error_count = 0
@@ -240,10 +259,12 @@ def update_prices(first_id: int, max_id: int, existing: pd.DataFrame) -> tuple[p
                 row = scrape_page(page_id, target_item)
                 if row is None:
                     continue
-                if row["announcement_key"] in known_keys:
+                publication = (row["published_date"], row["item"])
+                if publication in known_publications or row["published_date"] <= latest_dates.get(row["item"], ""):
                     duplicate_count += 1
                     continue
-                known_keys.add(row["announcement_key"])
+                known_publications.add(publication)
+                latest_dates[row["item"]] = row["published_date"]
                 new_rows.append(row)
             except requests.RequestException:
                 error_count += 1
@@ -251,7 +272,7 @@ def update_prices(first_id: int, max_id: int, existing: pd.DataFrame) -> tuple[p
                 error_count += 1
     if new_rows:
         existing = pd.concat([existing, pd.DataFrame(new_rows)], ignore_index=True)
-        existing = existing.drop_duplicates(subset=["announcement_key"], keep="first")
+        existing = normalize_history(existing)
         existing = existing.sort_values(["published_date", "source_id"]).reset_index(drop=True)
     return existing, {
         "scanned": scanned_count,
