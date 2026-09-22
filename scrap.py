@@ -228,6 +228,11 @@ def announcement_key(published_date: str, item: str, price: str = "") -> str:
     return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:20]
 
 
+def price_to_number(value: str) -> float | None:
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group()) if match else None
+
+
 def scrape_page(page_id: int, target_item: str) -> dict | None:
     url = URL_TEMPLATE.format(id=page_id)
     response = requests.get(
@@ -360,9 +365,7 @@ def render_dashboard() -> None:
     if item_data.empty:
         st.info("ยังไม่มีข้อมูล กด Update เพื่อเริ่มดึงข้อมูล")
         return
-    item_data["price_numeric"] = pd.to_numeric(
-        item_data["price"].str.replace(",", "", regex=False), errors="coerce"
-    )
+    item_data["price_numeric"] = item_data["price"].apply(price_to_number)
     latest = item_data.sort_values("published_date").iloc[-1]
     metric_columns = st.columns(3)
     metric_columns[0].metric("ราคาล่าสุด", latest["price"])
@@ -370,6 +373,7 @@ def render_dashboard() -> None:
     metric_columns[2].metric("จำนวนประกาศ", len(item_data))
     chart_data = item_data.dropna(subset=["price_numeric"]).sort_values("published_date")
     if not chart_data.empty:
+        st.markdown("#### กราฟแนวโน้มราคา")
         st.line_chart(chart_data.set_index("published_date")["price_numeric"])
     st.dataframe(
         item_data.sort_values("published_date", ascending=False)[
