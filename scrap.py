@@ -18,6 +18,7 @@ APP_DIR = Path(__file__).resolve().parent
 ANNOUNCEMENTS_FILE = APP_DIR / "announcements.csv"
 STATE_FILE = APP_DIR / "state.csv"
 START_ID = 2800
+MIN_ID = 1
 DEFAULT_MAX_ID = 2875
 URL_TEMPLATE = "https://wongpanit.com/print_history_price/{id}"
 ITEMS = {
@@ -340,10 +341,10 @@ def render_dashboard() -> None:
         backfill = st.checkbox("ดึงข้อมูลย้อนหลัง", value=False)
         default_start = max(START_ID, last_scanned_id + 1)
         if backfill:
-            first_id = st.number_input("ID เริ่มต้นย้อนหลัง", value=START_ID, min_value=START_ID, step=1)
+            first_id = st.number_input("ID เริ่มต้นย้อนหลัง", value=MIN_ID, min_value=MIN_ID, step=1)
         else:
-            first_id = st.number_input("ID เริ่มต้นรอบถัดไป", value=default_start, min_value=START_ID, disabled=True)
-        max_id = st.number_input("ID สูงสุดที่จะตรวจ", value=max(DEFAULT_MAX_ID, int(first_id)), min_value=START_ID, step=1)
+            first_id = st.number_input("ID เริ่มต้นรอบถัดไป", value=default_start, min_value=MIN_ID, disabled=True)
+        max_id = st.number_input("ID สูงสุดที่จะตรวจ", value=max(DEFAULT_MAX_ID, int(first_id)), min_value=MIN_ID, step=1)
         update_clicked = st.button("Update", type="primary", use_container_width=True)
         st.divider()
         st.metric("ID ล่าสุดที่ตรวจแล้ว", last_scanned_id)
