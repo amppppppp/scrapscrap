@@ -337,22 +337,26 @@ def render_dashboard() -> None:
     with st.sidebar:
         st.header("ตั้งค่า Update")
         target_item = st.selectbox("สินค้า", list(ITEMS))
+        backfill = st.checkbox("ดึงข้อมูลย้อนหลัง", value=False)
         default_start = max(START_ID, last_scanned_id + 1)
-        st.number_input("ID เริ่มต้นรอบถัดไป", value=default_start, min_value=START_ID, disabled=True)
-        max_id = st.number_input("ID สูงสุดที่จะตรวจ", value=max(DEFAULT_MAX_ID, default_start), min_value=START_ID, step=1)
+        if backfill:
+            first_id = st.number_input("ID เริ่มต้นย้อนหลัง", value=START_ID, min_value=START_ID, step=1)
+        else:
+            first_id = st.number_input("ID เริ่มต้นรอบถัดไป", value=default_start, min_value=START_ID, disabled=True)
+        max_id = st.number_input("ID สูงสุดที่จะตรวจ", value=max(DEFAULT_MAX_ID, int(first_id)), min_value=START_ID, step=1)
         update_clicked = st.button("Update", type="primary", use_container_width=True)
         st.divider()
         st.metric("ID ล่าสุดที่ตรวจแล้ว", last_scanned_id)
         st.caption(f"เก็บข้อมูลที่: {ANNOUNCEMENTS_FILE.name}")
 
     if update_clicked:
-        if max_id < default_start:
+        if max_id < first_id:
             st.error("ID สูงสุดต้องมากกว่า ID เริ่มต้น")
         else:
-            with st.spinner(f"กำลังตรวจ ID {default_start} ถึง {max_id}..."):
-                updated, summary = update_prices(default_start, int(max_id), existing)
+            with st.spinner(f"กำลังตรวจ ID {first_id} ถึง {max_id}..."):
+                updated, summary = update_prices(int(first_id), int(max_id), existing)
                 save_announcements(updated)
-                save_last_id(int(max_id))
+                save_last_id(max(last_scanned_id, int(max_id)))
                 existing = updated
             st.success(
                 f"อัปเดตเสร็จแล้ว: ตรวจ {summary['scanned']} ID, "
