@@ -1,5 +1,8 @@
 # Wongpanit Price Dashboard
 
+//////
+## Run Website ใช้ https://scrapscrap.streamlit.app/
+/////
 Streamlit dashboard สำหรับเก็บประวัติราคาจาก Wongpanit โดยตรวจเฉพาะ ID ใหม่และไม่เพิ่มประกาศซ้ำ
 
 ## รันในเครื่อง
