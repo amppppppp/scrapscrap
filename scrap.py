@@ -171,30 +171,65 @@ def save_announcements(frame: pd.DataFrame) -> None:
         ANNOUNCEMENTS_FILE.write_bytes(content)
 
 
-def load_last_id() -> int:
+def load_scan_state(existing: pd.DataFrame) -> dict[str, int]:
     if github_configured():
         content, _ = github_read_file("state.csv")
-        if content is None:
-            return START_ID - 1
-        state = pd.read_csv(io.BytesIO(content), dtype=str)
+        state = (
+            pd.read_csv(io.BytesIO(content), dtype=str).fillna("")
+            if content is not None
+            else pd.DataFrame()
+        )
     else:
-        if not STATE_FILE.exists():
-            return START_ID - 1
-        state = pd.read_csv(STATE_FILE, dtype=str)
+        state = (
+            pd.read_csv(STATE_FILE, dtype=str).fillna("")
+            if STATE_FILE.exists()
+            else pd.DataFrame()
+        )
+
+    source_ids = pd.to_numeric(existing["source_id"], errors="coerce")
+    scan_state = {}
+    for item in ITEMS.values():
+        item_ids = source_ids[existing["item"] == item]
+        scan_state[item] = int(item_ids.max()) if item_ids.notna().any() else START_ID - 1
     if state.empty or "last_scanned_id" not in state:
-        return START_ID - 1
+        return scan_state
+
+    if "item" in state:
+        for _, row in state.iterrows():
+            item = row["item"]
+            if item not in scan_state:
+                continue
+            try:
+                scan_state[item] = int(row["last_scanned_id"])
+            except (TypeError, ValueError):
+                continue
+        return scan_state
+
     try:
-        return int(state.iloc[0]["last_scanned_id"])
+        legacy_last_id = int(state.iloc[0]["last_scanned_id"])
     except (TypeError, ValueError):
-        return START_ID - 1
+        return scan_state
+    return {
+        item: legacy_last_id if (existing["item"] == item).any() else START_ID - 1
+        for item in ITEMS.values()
+    }
 
 
-def save_last_id(last_id: int) -> None:
+def save_scan_state(scan_state: dict[str, int]) -> None:
     content = pd.DataFrame(
-        [{"last_scanned_id": last_id, "updated_at": datetime.now().isoformat(timespec="seconds")}]
+        [
+            {
+                "item": item,
+                "last_scanned_id": last_id,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            for item, last_id in scan_state.items()
+        ]
     ).to_csv(index=False).encode("utf-8-sig")
     if github_configured():
-        github_write_file("state.csv", content, f"Save Wongpanit scan state at ID {last_id}")
+        github_write_file(
+            "state.csv", content, "Save Wongpanit per-item scan state"
+        )
     else:
         STATE_FILE.write_bytes(content)
 
@@ -262,55 +297,23 @@ def scrape_page(page_id: int, target_item: str) -> dict | None:
     }
 
 
-def scrape_page_date(page_id: int) -> str | None:
-    response = requests.get(
-        URL_TEMPLATE.format(id=page_id),
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    response.encoding = "utf-8"
-    soup = BeautifulSoup(response.text, "html.parser")
-    tables = soup.find_all("table")
-    return parse_thai_date(tables[0].get_text(" ", strip=True)) if tables else None
-
-
-def update_prices(first_id: int, max_id: int, existing: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def update_prices(
+    first_id: int, max_id: int, existing: pd.DataFrame, target_item: str
+) -> tuple[pd.DataFrame, dict]:
     if max_id < first_id:
         raise ValueError("Max ID ต้องมากกว่าหรือเท่ากับ ID เริ่มต้น")
     original_publications = set(zip(existing["published_date"], existing["item"]))
     scanned_rows = []
-    duplicate_count = 0
     error_count = 0
     scanned_count = 0
     for page_id in range(first_id, max_id + 1):
         scanned_count += 1
-        page_date = None
         try:
-            page_date = scrape_page_date(page_id)
+            row = scrape_page(page_id, target_item)
+            if row is not None:
+                scanned_rows.append(row)
         except requests.RequestException:
             error_count += 1
-        if page_date:
-            for target_item in ITEMS.values():
-                scanned_rows.append({
-                    "announcement_key": "",
-                    "source_id": str(page_id),
-                    "published_date": page_date,
-                    "item": target_item,
-                    "price": "",
-                    "url": URL_TEMPLATE.format(id=page_id),
-                    "scraped_at": datetime.now().isoformat(timespec="seconds"),
-                })
-        for target_item in ITEMS.values():
-            try:
-                row = scrape_page(page_id, target_item)
-                if row is None:
-                    continue
-                scanned_rows.append(row)
-            except requests.RequestException:
-                error_count += 1
-            except Exception:
-                error_count += 1
     combined = pd.concat([existing, pd.DataFrame(scanned_rows)], ignore_index=True)
     combined = remove_future_date_spikes(combined)
     combined = combined[combined["price"].astype(str).str.strip().ne("")]
@@ -334,11 +337,12 @@ def render_dashboard() -> None:
     st.caption("อัปเดตเฉพาะ ID ใหม่ และไม่สร้างประวัติซ้ำเมื่อหน้าเว็บแสดงประกาศล่าสุดเดิม")
 
     existing = load_announcements()
-    last_scanned_id = load_last_id()
+    scan_state = load_scan_state(existing)
     with st.sidebar:
         st.header("ตั้งค่า Update")
         target_item = st.selectbox("สินค้า", list(ITEMS))
         backfill = st.checkbox("ดึงข้อมูลย้อนหลัง", value=False)
+        last_scanned_id = scan_state[target_item]
         default_start = max(START_ID, last_scanned_id + 1)
         if backfill:
             first_id = st.number_input("ID เริ่มต้นย้อนหลัง", value=MIN_ID, min_value=MIN_ID, step=1)
@@ -347,17 +351,40 @@ def render_dashboard() -> None:
         max_id = st.number_input("ID สูงสุดที่จะตรวจ", value=max(DEFAULT_MAX_ID, int(first_id)), min_value=MIN_ID, step=1)
         update_clicked = st.button("Update", type="primary", use_container_width=True)
         st.divider()
-        st.metric("ID ล่าสุดที่ตรวจแล้ว", last_scanned_id)
+        st.metric(f"ID ล่าสุดที่ตรวจแล้ว ({target_item})", last_scanned_id)
         st.caption(f"เก็บข้อมูลที่: {ANNOUNCEMENTS_FILE.name}")
+
+    item_data = existing[existing["item"] == target_item].copy()
+    source_ids = pd.to_numeric(existing["source_id"], errors="coerce")
+    latest_known_id = int(source_ids.max()) if source_ids.notna().any() else START_ID - 1
+    auto_max_id = max(DEFAULT_MAX_ID, latest_known_id, max(scan_state.values(), default=DEFAULT_MAX_ID))
+    if not update_clicked and last_scanned_id < auto_max_id:
+        auto_first_id = START_ID if item_data.empty else max(START_ID, last_scanned_id + 1)
+        with st.spinner(f"กำลังโหลดข้อมูล {target_item} จาก CSV/เว็บไซต์..."):
+            updated, summary = update_prices(
+                auto_first_id, auto_max_id, existing, target_item
+            )
+            save_announcements(updated)
+            scan_state[target_item] = auto_max_id
+            save_scan_state(scan_state)
+            existing = updated
+        st.success(
+            f"โหลดข้อมูล {target_item} แล้ว: ตรวจ {summary['scanned']} ID, "
+            f"เพิ่มใหม่ {summary['new']} รายการ, ซ้ำ {summary['duplicates']} รายการ, "
+            f"ผิดพลาด {summary['errors']} รายการ"
+        )
 
     if update_clicked:
         if max_id < first_id:
             st.error("ID สูงสุดต้องมากกว่า ID เริ่มต้น")
         else:
             with st.spinner(f"กำลังตรวจ ID {first_id} ถึง {max_id}..."):
-                updated, summary = update_prices(int(first_id), int(max_id), existing)
+                updated, summary = update_prices(
+                    int(first_id), int(max_id), existing, target_item
+                )
                 save_announcements(updated)
-                save_last_id(max(last_scanned_id, int(max_id)))
+                scan_state[target_item] = max(last_scanned_id, int(max_id))
+                save_scan_state(scan_state)
                 existing = updated
             st.success(
                 f"อัปเดตเสร็จแล้ว: ตรวจ {summary['scanned']} ID, "
@@ -368,7 +395,7 @@ def render_dashboard() -> None:
     item_data = existing[existing["item"] == target_item].copy()
     st.subheader(f"ประวัติราคา: {target_item}")
     if item_data.empty:
-        st.info("ยังไม่มีข้อมูล กด Update เพื่อเริ่มดึงข้อมูล")
+        st.info("ยังไม่มีข้อมูลจากช่วง ID ที่ตรวจแล้ว กด Update หรือเลือกดึงข้อมูลย้อนหลัง")
         return
     item_data["price_numeric"] = item_data["price"].apply(price_to_number)
     latest = item_data.sort_values("published_date").iloc[-1]
