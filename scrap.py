@@ -65,7 +65,7 @@ def github_configured() -> bool:
 
 
 def github_file_path(filename: str) -> str:
-    data_dir = github_setting("GITHUB_DATA_DIR", "data").strip("/")
+    data_dir = github_setting("GITHUB_DATA_DIR").strip("/")
     return f"{data_dir}/{filename}" if data_dir else filename
 
 
@@ -340,10 +340,25 @@ def render_dashboard() -> None:
     scan_state = load_scan_state(existing)
     with st.sidebar:
         st.header("ตั้งค่า Update")
+        if github_configured():
+            st.caption("บันทึกข้อมูลผ่าน GitHub")
+        else:
+            st.warning(
+                "ยังไม่ได้ตั้งค่า GitHub Secrets: ข้อมูลที่บันทึกอาจหายเมื่อ Streamlit restart"
+            )
         target_item = st.selectbox("สินค้า", list(ITEMS))
         backfill = st.checkbox("ดึงข้อมูลย้อนหลัง", value=False)
         last_scanned_id = scan_state[target_item]
-        default_start = max(START_ID, last_scanned_id + 1)
+        item_source_ids = pd.to_numeric(
+            existing.loc[existing["item"] == target_item, "source_id"],
+            errors="coerce",
+        )
+        latest_item_id = (
+            int(item_source_ids.max())
+            if item_source_ids.notna().any()
+            else START_ID - 1
+        )
+        default_start = max(START_ID, latest_item_id + 1)
         if backfill:
             first_id = st.number_input("ID เริ่มต้นย้อนหลัง", value=MIN_ID, min_value=MIN_ID, step=1)
         else:
@@ -352,7 +367,12 @@ def render_dashboard() -> None:
         update_clicked = st.button("Update", type="primary", use_container_width=True)
         st.divider()
         st.metric(f"ID ล่าสุดที่ตรวจแล้ว ({target_item})", last_scanned_id)
-        st.caption(f"เก็บข้อมูลที่: {ANNOUNCEMENTS_FILE.name}")
+        if github_configured():
+            st.caption(
+                f"GitHub: {github_setting('GITHUB_REPO')}/{github_file_path('announcements.csv')}"
+            )
+        else:
+            st.caption(f"เก็บข้อมูลในเครื่องที่: {ANNOUNCEMENTS_FILE.name}")
 
     item_data = existing[existing["item"] == target_item].copy()
     source_ids = pd.to_numeric(existing["source_id"], errors="coerce")
